@@ -19,6 +19,7 @@ import os
 from sklearn.cluster import KMeans
 from sklearn import metrics
 from scipy.spatial.distance import cdist
+import datetime
 
 """
 Code to load and combine weather train and weather test
@@ -49,61 +50,90 @@ missing_weather  = cal_missing_val(train)
 print('Missing weather columns before imputations: \n')
 print(missing_weather,'\n')
 
-
 """
-Change date for weather_all
-Included function to process the data
+Sort and fill weather
 """
-def change_datetime(df):
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
-    df['year'] = df['timestamp'].map(lambda x: x.strftime('%Y')).astype(int)
-    df['month'] = df['timestamp'].map(lambda x: x.strftime('%m')).astype(int)
-    df['weekday'] = df['timestamp'].map(lambda x: x.weekday()).astype(int)
-    df['hour'] = df['timestamp'].map(lambda x: x.hour).astype(int)
-    return df
-train=change_datetime(train)
+def sort_fill_weather(weather_df):
+    #Code similar to Bojan Tunguz's
+    #0. find missing hours and reset
+    #1. sort and reindex by site_id/day/month
+    #2. fill the missing NA values by day means
+    #3. fill the missing NA values by ffill
+    #4. fill the missing NA values by bfill
 
-missing_values=train.set_index('site_id').isna().sum(level=0)
-print('Missing values of weather_all columns grouped by site_id \n')
-print(missing_values,'\n')
+    # Find Missing Dates
+    time_format = "%Y-%m-%d %H:%M:%S"
+    start_date = datetime.datetime.strptime(weather_df['timestamp'].min(), time_format)
+    end_date = datetime.datetime.strptime(weather_df['timestamp'].max(), time_format)
+    total_hours = int(((end_date - start_date).total_seconds() + 3600) / 3600)
+    hours_list = [(end_date - datetime.timedelta(hours=x)).strftime(time_format) for x in range(total_hours)]
 
-#Might want to remove site_id 5, because site_id 5 has no sea level pressure data
-#weather_all=weather_all[weather_all['site_id']!=5]
+    missing_hours = [] #list for missing hours
+    for site_id in range(16):
+        site_hours = np.array(weather_df[weather_df['site_id'] == site_id]['timestamp'])
+        new_rows = pd.DataFrame(np.setdiff1d(hours_list, site_hours), columns=['timestamp'])
+        new_rows['site_id'] = site_id
+        weather_df = pd.concat([weather_df, new_rows])
+
+        weather_df = weather_df.reset_index(drop=True)
+
+    # Add new Features
+    weather_df["datetime"] = pd.to_datetime(weather_df["timestamp"])
+    weather_df["day"] = weather_df["datetime"].dt.day
+    weather_df["week"] = weather_df["datetime"].dt.week
+    weather_df["month"] = weather_df["datetime"].dt.month
+    # Reset Index for Fast Update
+    weather_df = weather_df.set_index(['site_id', 'day', 'month'])
+
+    # Checking with columns are empty
+    empty_cols = []
+    for i in weather_df.columns:
+        if weather_df[i].isnull().any() == True:
+            empty_cols.append(i)
+
+    # Fill using day mean
+    for col in empty_cols:
+        col_filler=pd.DataFrame(weather_df.groupby(['site_id', 'day', 'month'])[col].mean(), columns=[col])
+        weather_df.update(col_filler,overwrite=False)
+
+    # Checking again which columns are still empty
+    empty_cols = []
+    for i in weather_df.columns:
+        if weather_df[i].isnull().any() == True:
+            empty_cols.append(i)
+
+    # Fill using ffill day mean
+    for col in empty_cols:
+        col_filler = weather_df.groupby(['site_id', 'day', 'month'])[col].mean()
+        col_filler = pd.DataFrame(col_filler.fillna(method='ffill'), columns=[col])
+        weather_df.update(col_filler, overwrite=False)
+
+    # Checking again which columns are still empty
+    empty_cols = []
+    for i in weather_df.columns:
+        if weather_df[i].isnull().any() == True:
+            empty_cols.append(i)
+
+    # Fill using bfill day mean
+    for col in empty_cols:
+        col_filler = weather_df.groupby(['site_id', 'day', 'month'])[col].mean()
+        col_filler = pd.DataFrame(col_filler.fillna(method='bfill'), columns=[col])
+        weather_df.update(col_filler, overwrite=False)
+
+    weather_df = weather_df.reset_index()
+    weather_df = weather_df.drop(['datetime', 'day', 'week', 'month'], axis=1)
+
+    return weather_df
+
+train=sort_fill_weather(train)
+missing_weather  = cal_missing_val(train)
+print('i')
 
 
-"""
-Imputing rolling mean weather 
-"""
-def rolling_mean_weather(df, cols, num_of_hours):
-    # assumes that functions will be mean (can include median, max, and min too)
-    for col in cols:
-        for hour in num_of_hours:
-            print("processing missing values for", col, hour)
-            df[col + '_' + 'R' + str(hour) + '_' + 'mean'] = \
-                df.groupby('site_id')[col].apply(lambda x: x.fillna (x.rolling(hour,center=True, min_periods=1).mean()))
-    return df
-cols_to_impute = ['air_temperature', 'cloud_coverage', 'dew_temperature', 'precip_depth_1_hr', 'sea_level_pressure',
-                  'wind_direction', 'wind_speed']
-train= rolling_mean_weather(train, cols_to_impute, [72])
-missing_weather= cal_missing_val(train)
-print(missing_weather)
 
 
-def rev_rolling_mean_weather(df,cols,num_of_hours):
-    # assumes that functions will be mean (can include median, max, and min too)
-    df[::-1]
-    for col in cols:
-        for hour in num_of_hours:
-            print("processing missing values for", col, hour)
-            df[col + '_' + 'R' + str(hour) + '_' + 'mean_reversed'] = \
-                df.groupby('site_id')[col].apply(lambda x: x.fillna(x.rolling(hour, center=True, min_periods=1).mean()))
-    return df
-cols_to_impute = ['cloud_coverage_R72_mean', 'precip_depth_1_hr_R72_mean', 'sea_level_pressure_R72_mean']
-weather_all= rev_rolling_mean_weather(train, cols_to_impute, [72])
-missing_weather= cal_missing_val(train)
-print(missing_weather)
 
-missing_values=train.set_index('site_id').isna().sum(level=0)
-print(missing_values.head())
-#missing_values2=missing_values[['cloud_coverage_R72_mean','precip_depth_1_hr_R72_mean','sea_level_pressure_R72_mean']]
-#missing_values2
+
+
+
+
